@@ -47,6 +47,7 @@ for ex in json.load(open(input_dataset_path)):
 
 filenames = [
 	"translate_with_manual/DeepSeek-R1-Distill-Qwen-32B_2_28.json",
+	"translate_with_manual/DeepSeek-R1-Distill-Qwen-32B_3_03.json",
 ]
 filename = st.selectbox("Which examples would you like to see?", filenames)
 experiment_results = json.load(open(filename))

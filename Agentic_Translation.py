@@ -173,14 +173,14 @@ def render_whole_experiment_summary(generations):
                 error_totals[error] += count
         
         sorted_errors = sorted(error_totals.items(), key=lambda x: x[1], reverse=True)
-        top_errors = {error for error, count in sorted_errors[:9]}
+        top_errors = {error for error, _ in sorted_errors[:9]}
         for iteration, errors in assembly_errors_by_iteration.items():
             other_count = sum(count for error, count in errors.items() if error not in top_errors)
             assembly_errors_by_iteration[iteration] = {error: count for error, count in errors.items() if error in top_errors}
             assembly_errors_by_iteration[iteration]["Other"] = other_count
         
         # Sort legend by most frequent error
-        legend_order = [category for category, _ in sorted(assembly_errors_by_iteration[0].items(), key=lambda x: x[1], reverse=True)]
+        legend_order = [error for (error, _) in sorted_errors[:9]] + ["Other"]
         
         # all_assembly_errors = list(set(err for round_errors in assembly_errors_by_iteration.values() for err in round_errors))
         iterations = sorted(assembly_errors_by_iteration.keys())

@@ -47,15 +47,15 @@ for ex in json.load(open(input_dataset_path)):
 
 filenames = [
 	"translate_with_manual/DeepSeek-R1-Distill-Qwen-32B_3_03.json",
+    "gen_from_manual/DeepSeek-R1-Distill-Qwen-32B.json",
 	"translate_with_manual/DeepSeek-R1-Distill-Qwen-32B_2_28.json",
 ]
 filename = st.selectbox("Which examples would you like to see?", filenames)
 experiment_results = json.load(open(filename))
 
-examples = {ex["orig_filename"]: ex for ex in experiment_results}
-successes = set()
 
-def render_whole_experiment_summary(generations):
+def render_whole_translation_experiment_summary(generations):
+    successes = set()
     # shows role of feedback
     ex_to_attempts = defaultdict(lambda: defaultdict(str))
     assembly_errors_by_iteration = defaultdict(lambda: defaultdict(int))
@@ -199,14 +199,144 @@ def render_whole_experiment_summary(generations):
         st.pyplot(plt.gcf(), )
         plt.close()
 
-render_whole_experiment_summary(experiment_results)
+    return successes
+
+
+def render_whole_generate_experiment_summary(generations):
+    successes = set()
+    # shows role of feedback
+    ex_to_attempts = defaultdict(lambda: defaultdict(str))
+    assembly_errors_by_iteration = defaultdict(lambda: defaultdict(int))
+    
+    max_num_iterations = 0
+    for ex_id, ex in enumerate(generations):
+        wanted_insns = list(ex["chunks"].keys())
+        if ex_id not in ex_to_attempts: ex_to_attempts[ex_id] = []
+        for attempts in ex["samples"]:
+            ex_to_attempts[ex_id].append([])
+            for iteration, sample in enumerate(attempts):
+                max_num_iterations = max(iteration, max_num_iterations)
+                tested_code = sample["tested_code"]
+                results = sample["results"]
+                if tested_code is None:
+                    this_error_stage_index = stages.index("GENERATION")
+                elif not check_used_insns(tested_code, wanted_insns, wanted_regs):
+                    this_error_stage_index = stages.index("USE_INSN")
+                elif results[0] is None: 
+                    this_error_stage_index = stages.index("SUCCESS")
+                    successes.add(ex_id)
+                elif results[0].startswith("ASSEMBLE AND L"):
+                    this_error_stage_index = stages.index("ASSEMBLY")
+                    matches = error_pattern.findall(results[1])
+                    for match in matches:
+                        error_message = match.strip().lower()
+                        error_category = error_message
+                        for poss_prefix in possible_error_prefixes:
+                            if error_message.startswith(poss_prefix): 
+                                error_category = poss_prefix
+                                break
+                        assembly_errors_by_iteration[iteration][error_category] += 1
+                elif results[0] == "QEMU":
+                    this_error_stage_index = stages.index("QEMU")
+                else: breakpoint()
+
+                ex_to_attempts[ex_id][-1].append(stages[this_error_stage_index])
+
+    stages_col, asm_col = st.columns(2)
+    iterations = list(range(max_num_iterations+1))
+
+    with stages_col:
+        # Stacked bar plot of errors by stage per iteration
+        it_to_ratios = [{} for _ in iterations]
+        for ex_id, attempts in ex_to_attempts.items():
+            for it in iterations:
+                if ex_id not in it_to_ratios[it]: it_to_ratios[it][ex_id] = []
+                for attempt_chain in attempts:
+                    if it >= len(attempt_chain):
+                        it_to_ratios[it][ex_id].append(attempt_chain[-1])
+                    else:
+                        it_to_ratios[it][ex_id].append(attempt_chain[it])
+        stage_counts_per_iteration = {stage: [] for stage in stages}
+
+        for it, example_info in enumerate(it_to_ratios):
+            for stage in stages:
+                stage_to_ratios = [ex_it_stages_list.count(stage) / len(ex_it_stages_list) for ex_it_stages_list in example_info.values()]   
+                stage_counts_per_iteration[stage].append(sum(stage_to_ratios))
+
+        # x axis: iterations
+        # stacked bar: each segment of stack is stage
+        x = np.arange(len(iterations))
+        width = 0.6
+        bottom_vals = np.zeros(len(iterations))
+
+        plt.figure(figsize=(10, 6))
+
+        for stage in stages:
+            plt.bar(x, stage_counts_per_iteration[stage], width, label=stage, bottom=bottom_vals)
+            bottom_vals += np.array(stage_counts_per_iteration[stage])
+            
+        plt.xlabel("Feedback Iteration")
+        plt.ylabel("Examples Status Breakdown")
+        plt.ylim(bottom=0)
+        plt.xticks(x, iterations)
+        plt.title(f"Errors by Stage per Feedback Iteration ({len(it_to_ratios[0])} examples)")
+        plt.legend()
+        plt.grid()
+        st.pyplot(plt.gcf(), )
+        plt.close()
+    
+    
+    with asm_col:
+        # Plot breakdown of assembly errors by feedback iteration
+        plt.figure(figsize=(12, 6))
+        # Filter for top error categories
+        error_totals = defaultdict(int)
+        for iteration_errors in assembly_errors_by_iteration.values():
+            for error, count in iteration_errors.items():
+                error_totals[error] += count
+        
+        sorted_errors = sorted(error_totals.items(), key=lambda x: x[1], reverse=True)
+        top_errors = {error for error, _ in sorted_errors[:9]}
+        for iteration, errors in assembly_errors_by_iteration.items():
+            other_count = sum(count for error, count in errors.items() if error not in top_errors)
+            assembly_errors_by_iteration[iteration] = {error: count for error, count in errors.items() if error in top_errors}
+            assembly_errors_by_iteration[iteration]["Other"] = other_count
+        
+        # Sort legend by most frequent error
+        legend_order = [error for (error, _) in sorted_errors[:9]] + ["Other"]
+        
+        # all_assembly_errors = list(set(err for round_errors in assembly_errors_by_iteration.values() for err in round_errors))
+        iterations = sorted(assembly_errors_by_iteration.keys())
+        
+        for error_type in legend_order:
+            error_counts = [assembly_errors_by_iteration[iteration].get(error_type, 0) for iteration in iterations]
+            plt.plot(iterations, error_counts, marker='o', linestyle='-', label=error_type)
+        
+        plt.xlabel("Feedback Iteration")
+        plt.ylabel("Assembly Error Count")
+        plt.ylim(bottom=0)
+        plt.title(f"Breakdown of Assembly Errors by Feedback Iteration")
+        plt.legend(loc="upper right", bbox_to_anchor=(1.3, 1))
+        plt.grid()
+        st.pyplot(plt.gcf(), )
+        plt.close()
+
+    return successes
+
+
+if "translate_with_manual" in filename:
+    examples = {ex["orig_filename"]: ex for ex in experiment_results}
+    successes = render_whole_translation_experiment_summary(experiment_results)
+else:
+    examples = {ex_id: ex for ex_id, ex in enumerate(experiment_results)} 
+    successes = render_whole_generate_experiment_summary(experiment_results)
+
 st.subheader("Successes:"+ str(successes))
 
 example_key = st.selectbox("Choose your example", list(examples.keys()))
-example = examples[example_key]
 
-def render_for_example(example):
-    filename = example["orig_filename"]
+def render_for_example(example_key):
+    example = examples[example_key]
     wanted_insns = list(example["chunks"].keys())
 
     chunk_expanders = []
@@ -220,7 +350,7 @@ def render_for_example(example):
         for it_data in sample:
             tested_code = it_data['tested_code']
             results = it_data['results']
-            if tested_code and (results[0] is None) and orig_files_data[filename]["true_exc_output"] == results[1]:
+            if tested_code and (results[0] is None) and orig_files_data[example_key]["true_exc_output"] == results[1]:
                 if check_used_insns(tested_code, wanted_insns, wanted_regs):
                     eventually_succeeds = True
 
@@ -239,7 +369,7 @@ def render_for_example(example):
                 if tested_code is None: stage = "GENERATION"
                 elif not check_used_insns(tested_code, wanted_insns, wanted_regs): stage = "USE_INSN"
                 elif results[0] is None: 
-                    if orig_files_data[filename]["true_exc_output"] == results[1]: stage = "SUCCESS"
+                    if orig_files_data[example_key]["true_exc_output"] == results[1]: stage = "SUCCESS"
                     else: stage = "WRONG_OUTPUT"
                 elif results[0].startswith("ASSEMBLE AND L"):
                     stage = "ASSEMBLY"
@@ -258,24 +388,24 @@ def render_for_example(example):
 
                 it_expander = tab.expander(f"Iteration {iteration}: {stage}")
 
-                if it_expander.checkbox("See code diff (orig | generated)", key=f"{filename}_{sample_idx}_{iteration}_diff"):
+                if it_expander.checkbox("See code diff (orig | generated)", key=f"{example_key}_{sample_idx}_{iteration}_diff"):
                     st.subheader("DIFF: (orig | generated)")
-                    diff = difflib.HtmlDiff().make_table(orig_files_data[filename]["original_code"].split('\n'), tested_code.split('\n'), context=True)
+                    diff = difflib.HtmlDiff().make_table(orig_files_data[example_key]["original_code"].split('\n'), tested_code.split('\n'), context=True)
                     components.html(diff, height=350, scrolling=True)
 
-                if it_expander.checkbox("See code diff (generated | gold)", key=f"{filename}_{sample_idx}_{iteration}_golddiff"):
+                if it_expander.checkbox("See code diff (generated | gold)", key=f"{example_key}_{sample_idx}_{iteration}_golddiff"):
                     st.subheader("DIFF: (generated | gold)")
-                    diff = difflib.HtmlDiff().make_table(tested_code.split('\n'), orig_files_data[filename]["gold"].split('\n'), context=True)
+                    diff = difflib.HtmlDiff().make_table(tested_code.split('\n'), orig_files_data[example_key]["gold"].split('\n'), context=True)
                     components.html(diff, height=350, scrolling=True)
 
 
-                if it_expander.checkbox("See prompt", key=f"{filename}_{sample_idx}_{iteration}_prompt"):
+                if it_expander.checkbox("See prompt", key=f"{example_key}_{sample_idx}_{iteration}_prompt"):
                     it_expander.write(prompt)
 
-                if it_expander.checkbox("See full generation", key=f"{filename}_{sample_idx}_{iteration}_gen"):
+                if it_expander.checkbox("See full generation", key=f"{example_key}_{sample_idx}_{iteration}_gen"):
                     it_expander.write(generation)
 
-                # if it_expander.checkbox("Show generated code & result", key=f"{filename}_{sample_idx}_{iteration}_code"):
+                # if it_expander.checkbox("Show generated code & result", key=f"{example_key}_{sample_idx}_{iteration}_code"):
                 it_expander.code(tested_code)
                 it_expander.write(results)
 
@@ -323,4 +453,4 @@ def render_for_example(example):
 
             st.pyplot(plt.gcf(), clear_figure=True)
 
-render_for_example(example)
+render_for_example(example_key)

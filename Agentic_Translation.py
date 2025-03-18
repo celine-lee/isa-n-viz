@@ -46,6 +46,7 @@ for ex in json.load(open(input_dataset_path)):
     orig_files_data[filename] = {"true_exc_output": ex["true_exc_output"], "original_code": orig_code, "gold": ex["completion"]}
 
 filenames = [
+	"translate_with_manual/DeepSeek-R1_03_13.json",
 	"translate_with_manual/DeepSeek-R1-Distill-Qwen-32B_3_03.json",
 	"gen_from_manual/DeepSeek-R1-Distill-Qwen-32B_03_04.json", 
     "gen_from_manual/DeepSeek-R1-Distill-Qwen-32B.json",

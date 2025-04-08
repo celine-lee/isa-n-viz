@@ -47,6 +47,8 @@ for ex in json.load(open(input_dataset_path)):
 
 filenames = [
 	"translate_with_manual/DeepSeek-R1_03_13.json",
+	"translate_with_manual/DeepSeek-R1-Distill-Qwen-1.5B.json",
+	"translate_with_manual/r1qw1.5B-sve-distill-r1_all.json",
 	"translate_with_manual/DeepSeek-R1-Distill-Qwen-32B_3_03.json",
 	"gen_from_manual/DeepSeek-R1-Distill-Qwen-32B_03_04.json", 
     "gen_from_manual/DeepSeek-R1-Distill-Qwen-32B.json",

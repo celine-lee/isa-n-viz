@@ -6,7 +6,9 @@ import difflib
 import numpy as np
 
 import json
+import glob
 import re
+import os
 
 st.set_page_config(page_title="ISA-N", layout='wide')
 
@@ -26,6 +28,7 @@ possible_error_prefixes = {
     "immediate must be a",
     "instruction is unpredictable when",
 }
+
 def check_used_insns(generated_code, wanted_insns, wanted_registers):
     if not generated_code: return False
     if any([re.search(r'\n\s*' + insn + r'\s', generated_code) is not None for insn in wanted_insns]):
@@ -35,9 +38,15 @@ def check_used_insns(generated_code, wanted_insns, wanted_registers):
     return False
 
 
+filenames = [fn for fn in glob.glob(os.path.join("translate_with_manual", "*.json")) if re.search(r'_O[0123]', fn)]
+filename = st.selectbox("Which examples would you like to see?", sorted(filenames))
+experiment_results = json.load(open(filename))
+
+
 # LOAD IN DATA
+opt_level = re.search(r'_(O0|O1|O2|O3)', filename).group(1)
 orig_files_data = {}
-input_dataset_path = f"translate_with_manual/translate_{tgt_lang}_dataset.json"
+input_dataset_path = f"translate_with_manual/translate_{tgt_lang}_from_{opt_level}_dataset.json"
 for ex in json.load(open(input_dataset_path)):
     filename = re.search(r'```[\s\S]+.file\s*\"(.+\.c)\"\n[\s\S]+```', ex["prompt"])
     if filename is None: breakpoint()
@@ -45,94 +54,91 @@ for ex in json.load(open(input_dataset_path)):
     filename = filename.group(1)
     orig_files_data[filename] = {"true_exc_output": ex["true_exc_output"], "original_code": orig_code, "gold": ex["completion"]}
 
-filenames = [
-	"translate_with_manual/DeepSeek-R1_03_13.json",
-	"translate_with_manual/DeepSeek-R1-Distill-Qwen-1.5B.json",
-	"translate_with_manual/r1qw1.5B-sve-distill-r1_all-4_08.json",
-	"translate_with_manual/r1qw1.5B-sve-distill-r1_all_reasoning_04_08.json",
-	"translate_with_manual/r1qw1.5B-sve-distill-r1_all_reasoning_04_09.json",
-	"translate_with_manual/DeepSeek-R1-Distill-Qwen-32B_3_03.json",
-	"gen_from_manual/DeepSeek-R1-Distill-Qwen-32B_03_04.json", 
-    "gen_from_manual/DeepSeek-R1-Distill-Qwen-32B.json",
-	"translate_with_manual/DeepSeek-R1-Distill-Qwen-32B_2_28.json",
-]
-filename = st.selectbox("Which examples would you like to see?", filenames)
-experiment_results = json.load(open(filename))
-
-
 def render_whole_translation_experiment_summary(generations):
     successes = set()
     # shows role of feedback
     ex_to_attempts = defaultdict(lambda: defaultdict(str))
     assembly_errors_by_iteration = defaultdict(lambda: defaultdict(int))
     
-    # shows success rate: example -> best it does
-    # final_stage = defaultdict(lambda: defaultdict(str))
-
     max_num_iterations = 0
     for ex in generations:
         wanted_insns = list(ex["chunks"].keys())
         filename = ex["orig_filename"]
-        if filename not in ex_to_attempts: ex_to_attempts[filename] = []
+        if filename not in ex_to_attempts:
+            ex_to_attempts[filename] = []
         for attempts in ex["samples"]:
-            ex_to_attempts[filename].append([])
+            # Use a list to store the chain of stages for this attempt.
+            attempt_chain = []
+            # Use a flag to indicate if a success has been achieved in this chain.
+            success_found = False
+            
             for iteration, sample in enumerate(attempts):
                 max_num_iterations = max(iteration, max_num_iterations)
-                tested_code = sample["tested_code"]
-                results = sample["results"]
-                if tested_code is None:
-                    this_error_stage_index = stages.index("GENERATION")
-                elif not check_used_insns(tested_code, wanted_insns, wanted_regs):
-                    this_error_stage_index = stages.index("USE_INSN")
-                elif results[0] is None: 
-                    # check whether the outputs match.
-                    if orig_files_data[filename]["true_exc_output"] == results[1]:
-                        this_error_stage_index = stages.index("SUCCESS")
-                        successes.add(filename)
-                    else: 
-                        this_error_stage_index = stages.index("WRONG_OUTPUT")
-                elif results[0].startswith("ASSEMBLE AND L"):
-                    this_error_stage_index = stages.index("ASSEMBLY")
-                    matches = error_pattern.findall(results[1])
-                    for match in matches:
-                        error_message = match.strip().lower()
-                        error_category = error_message
-                        for poss_prefix in possible_error_prefixes:
-                            if error_message.startswith(poss_prefix): 
-                                error_category = poss_prefix
-                                break
-                        assembly_errors_by_iteration[iteration][error_category] += 1
-                elif results[0] == "QEMU":
-                    this_error_stage_index = stages.index("QEMU")
-                else: breakpoint()
-            
+                if success_found:
+                    # If success was already achieved in an earlier iteration,
+                    # then count this iteration as success.
+                    stage = "SUCCESS"
+                else:
+                    tested_code = sample["tested_code"]
+                    results = sample["results"]
+                    
+                    if tested_code is None:
+                        stage = "GENERATION"
+                    elif not check_used_insns(tested_code, wanted_insns, wanted_regs):
+                        stage = "USE_INSN"
+                    elif results[0] is None: 
+                        # check whether the outputs match.
+                        if orig_files_data[filename]["true_exc_output"] == results[1]:
+                            stage = "SUCCESS"
+                            success_found = True
+                            successes.add(filename)
+                        else:
+                            stage = "WRONG_OUTPUT"
+                    elif results[0].startswith("ASSEMBLE AND L"):
+                        stage = "ASSEMBLY"
+                        matches = error_pattern.findall(results[1])
+                        for match in matches:
+                            error_message = match.strip().lower()
+                            error_category = error_message
+                            for poss_prefix in possible_error_prefixes:
+                                if error_message.startswith(poss_prefix): 
+                                    error_category = poss_prefix
+                                    break
+                            assembly_errors_by_iteration[iteration][error_category] += 1
+                    elif results[0] == "QEMU":
+                        stage = "QEMU"
+                    else:
+                        breakpoint()
+                attempt_chain.append(stage)
 
-                ex_to_attempts[filename][-1].append(stages[this_error_stage_index])
-                # if filename in final_stage:
-                #     final_stage[filename] = max(this_error_stage_index, final_stage[filename])
-                # else:
-                #     final_stage[filename] = this_error_stage_index
+            ex_to_attempts[filename].append(attempt_chain)
 
+    # Continue processing for visualization.
     stages_col, asm_col = st.columns(2)
-    # stages_col, pie_col, asm_col = st.columns(3)
     iterations = list(range(max_num_iterations+1))
-
+    
     with stages_col:
-        # Stacked bar plot of errors by stage per iteration
+        # For each iteration, create a mapping of example to the stage reached.
         it_to_ratios = [{} for _ in iterations]
         for filename, attempts in ex_to_attempts.items():
             for it in iterations:
-                if filename not in it_to_ratios[it]: it_to_ratios[it][filename] = []
+                if filename not in it_to_ratios[it]:
+                    it_to_ratios[it][filename] = []
                 for attempt_chain in attempts:
                     if it >= len(attempt_chain):
+                        # If the chain is shorter than the current iteration,
+                        # take the last recorded stage.
                         it_to_ratios[it][filename].append(attempt_chain[-1])
                     else:
                         it_to_ratios[it][filename].append(attempt_chain[it])
         stage_counts_per_iteration = {stage: [] for stage in stages}
-
+    
         for it, example_info in enumerate(it_to_ratios):
             for stage in stages:
-                stage_to_ratios = [ex_it_stages_list.count(stage) / len(ex_it_stages_list) for ex_it_stages_list in example_info.values()]   
+                stage_to_ratios = [
+                    ex_it_stages_list.count(stage) / len(ex_it_stages_list) if len(ex_it_stages_list) else 0.0
+                    for ex_it_stages_list in example_info.values()
+                ]
                 stage_counts_per_iteration[stage].append(sum(stage_to_ratios))
 
         # x axis: iterations
@@ -172,7 +178,7 @@ def render_whole_translation_experiment_summary(generations):
     
     with asm_col:
         # Plot breakdown of assembly errors by feedback iteration
-        plt.figure(figsize=(12, 6))
+        plt.figure(figsize=(8, 6))
         # Filter for top error categories
         error_totals = defaultdict(int)
         for iteration_errors in assembly_errors_by_iteration.values():
@@ -206,138 +212,10 @@ def render_whole_translation_experiment_summary(generations):
         plt.close()
 
     return successes
-
-
-def render_whole_generate_experiment_summary(generations):
-    successes = set()
-    # shows role of feedback
-    ex_to_attempts = defaultdict(lambda: defaultdict(str))
-    assembly_errors_by_iteration = defaultdict(lambda: defaultdict(int))
     
-    max_num_iterations = 0
-    for ex_id, ex in enumerate(generations):
-        wanted_insns = list(ex["chunks"].keys())
-        if ex_id not in ex_to_attempts: ex_to_attempts[ex_id] = []
-        for attempts in ex["samples"]:
-            ex_to_attempts[ex_id].append([])
-            for iteration, sample in enumerate(attempts):
-                max_num_iterations = max(iteration, max_num_iterations)
-                tested_code = sample["tested_code"]
-                results = sample["results"]
-                if tested_code is None:
-                    this_error_stage_index = stages.index("GENERATION")
-                elif not check_used_insns(tested_code, wanted_insns, wanted_regs):
-                    this_error_stage_index = stages.index("USE_INSN")
-                elif results[0] is None: 
-                    this_error_stage_index = stages.index("SUCCESS")
-                    successes.add(ex_id)
-                elif results[0].startswith("ASSEMBLE AND L"):
-                    this_error_stage_index = stages.index("ASSEMBLY")
-                    matches = error_pattern.findall(results[1])
-                    for match in matches:
-                        error_message = match.strip().lower()
-                        error_category = error_message
-                        for poss_prefix in possible_error_prefixes:
-                            if error_message.startswith(poss_prefix): 
-                                error_category = poss_prefix
-                                break
-                        assembly_errors_by_iteration[iteration][error_category] += 1
-                elif results[0] == "QEMU":
-                    this_error_stage_index = stages.index("QEMU")
-                else: breakpoint()
-
-                ex_to_attempts[ex_id][-1].append(stages[this_error_stage_index])
-
-    stages_col, asm_col = st.columns(2)
-    iterations = list(range(max_num_iterations+1))
-
-    with stages_col:
-        # Stacked bar plot of errors by stage per iteration
-        it_to_ratios = [{} for _ in iterations]
-        for ex_id, attempts in ex_to_attempts.items():
-            for it in iterations:
-                if ex_id not in it_to_ratios[it]: it_to_ratios[it][ex_id] = []
-                for attempt_chain in attempts:
-                    if it >= len(attempt_chain):
-                        it_to_ratios[it][ex_id].append(attempt_chain[-1])
-                    else:
-                        it_to_ratios[it][ex_id].append(attempt_chain[it])
-        stage_counts_per_iteration = {stage: [] for stage in stages}
-
-        for it, example_info in enumerate(it_to_ratios):
-            for stage in stages:
-                stage_to_ratios = [ex_it_stages_list.count(stage) / len(ex_it_stages_list) for ex_it_stages_list in example_info.values()]   
-                stage_counts_per_iteration[stage].append(sum(stage_to_ratios))
-
-        # x axis: iterations
-        # stacked bar: each segment of stack is stage
-        x = np.arange(len(iterations))
-        width = 0.6
-        bottom_vals = np.zeros(len(iterations))
-
-        plt.figure(figsize=(10, 6))
-
-        for stage in stages:
-            plt.bar(x, stage_counts_per_iteration[stage], width, label=stage, bottom=bottom_vals)
-            bottom_vals += np.array(stage_counts_per_iteration[stage])
-            
-        plt.xlabel("Feedback Iteration")
-        plt.ylabel("Examples Status Breakdown")
-        plt.ylim(bottom=0)
-        plt.xticks(x, iterations)
-        plt.title(f"Errors by Stage per Feedback Iteration ({len(it_to_ratios[0])} examples)")
-        plt.legend()
-        plt.grid()
-        st.pyplot(plt.gcf(), )
-        plt.close()
-    
-    
-    with asm_col:
-        # Plot breakdown of assembly errors by feedback iteration
-        plt.figure(figsize=(12, 6))
-        # Filter for top error categories
-        error_totals = defaultdict(int)
-        for iteration_errors in assembly_errors_by_iteration.values():
-            for error, count in iteration_errors.items():
-                error_totals[error] += count
-        
-        sorted_errors = sorted(error_totals.items(), key=lambda x: x[1], reverse=True)
-        top_errors = {error for error, _ in sorted_errors[:9]}
-        for iteration, errors in assembly_errors_by_iteration.items():
-            other_count = sum(count for error, count in errors.items() if error not in top_errors)
-            assembly_errors_by_iteration[iteration] = {error: count for error, count in errors.items() if error in top_errors}
-            assembly_errors_by_iteration[iteration]["Other"] = other_count
-        
-        # Sort legend by most frequent error
-        legend_order = [error for (error, _) in sorted_errors[:9]] + ["Other"]
-        
-        # all_assembly_errors = list(set(err for round_errors in assembly_errors_by_iteration.values() for err in round_errors))
-        iterations = sorted(assembly_errors_by_iteration.keys())
-        
-        for error_type in legend_order:
-            error_counts = [assembly_errors_by_iteration[iteration].get(error_type, 0) for iteration in iterations]
-            plt.plot(iterations, error_counts, marker='o', linestyle='-', label=error_type)
-        
-        plt.xlabel("Feedback Iteration")
-        plt.ylabel("Assembly Error Count")
-        plt.ylim(bottom=0)
-        plt.title(f"Breakdown of Assembly Errors by Feedback Iteration")
-        plt.legend(loc="upper right", bbox_to_anchor=(1.3, 1))
-        plt.grid()
-        st.pyplot(plt.gcf(), )
-        plt.close()
-
-    return successes
-
-
-if "translate_with_manual" in filename:
-    examples = {ex["orig_filename"]: ex for ex in experiment_results}
-    successes = render_whole_translation_experiment_summary(experiment_results)
-else:
-    examples = {ex_id: ex for ex_id, ex in enumerate(experiment_results)} 
-    successes = render_whole_generate_experiment_summary(experiment_results)
-
-st.subheader("Successes:"+ str(successes))
+examples = {ex["orig_filename"]: ex for ex in experiment_results}
+successes = render_whole_translation_experiment_summary(experiment_results)
+st.subheader("Successes:" + str(successes))
 
 example_key = st.selectbox("Choose your example", list(examples.keys()))
 
